@@ -12,7 +12,12 @@
     "format": "prettier --write \"src/**/*.ts\"",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "db:migrate": "npx prisma migrate dev",
+    "db:push": "npx prisma db push",
+    "db:seed": "ts-node prisma/seed.ts",
+    "db:studio": "npx prisma studio",
+    "db:reset": "npx prisma migrate reset"
   },
   "keywords": [
     "github",
@@ -24,6 +29,9 @@
   ],
   "author": "",
   "license": "MIT",
+  "prisma": {
+    "seed": "ts-node prisma/seed.ts"
+  },
   "dependencies": {
     "@prisma/client": "^6.17.1",
     "bcryptjs": "^3.0.2",

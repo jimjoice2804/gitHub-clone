@@ -10,4 +10,542 @@ datasource db {
     url      = env("DATABASE_URL")
 }
 
-// Models will be added in Phase 3
+// ============================================
+// USER MODELS
+// ============================================
+
+model User {
+    id        String  @id @default(uuid())
+    username  String  @unique
+    email     String  @unique
+    password  String
+    name      String?
+    bio       String?
+    location  String?
+    website   String?
+    avatarUrl String?
+    company   String?
+
+    isVerified Boolean  @default(false)
+    createdAt  DateTime @default(now())
+    updatedAt  DateTime @updatedAt
+
+    // Relations
+    repositories       Repository[]
+    ownedOrganizations Organization[]
+
+    stars     Star[]
+    watching  Watch[]
+    followers Follow[] @relation("UserFollowers")
+    following Follow[] @relation("UserFollowing")
+
+    issues         Issue[]
+    issueAssignees IssueAssignee[]
+    issueComments  IssueComment[]
+
+    pullRequests PullRequest[]
+    prAssignees  PullRequestAssignee[]
+    prReviews    PullRequestReview[]
+    prComments   PullRequestComment[]
+
+    commits        Commit[]
+    collaborations Collaborator[]
+    notifications  Notification[]
+    activities     Activity[]
+
+    @@index([username])
+    @@index([email])
+    @@map("users")
+}
+
+model Follow {
+    id          String   @id @default(uuid())
+    followerId  String
+    followingId String
+    createdAt   DateTime @default(now())
+
+    follower  User @relation("UserFollowers", fields: [followerId], references: [id], onDelete: Cascade)
+    following User @relation("UserFollowing", fields: [followingId], references: [id], onDelete: Cascade)
+
+    @@unique([followerId, followingId])
+    @@index([followerId])
+    @@index([followingId])
+    @@map("follows")
+}
+
+// ============================================
+// REPOSITORY MODELS
+// ============================================
+
+model Repository {
+    id          String  @id @default(uuid())
+    name        String
+    description String?
+    isPrivate   Boolean @default(false)
+    language    String?
+
+    defaultBranch String @default("main")
+    gitUrl        String @unique
+
+    starsCount        Int @default(0)
+    forksCount        Int @default(0)
+    watchersCount     Int @default(0)
+    issuesCount       Int @default(0)
+    pullRequestsCount Int @default(0)
+
+    ownerId        String
+    forkedFromId   String?
+    organizationId String?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    // Relations
+    owner        User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+    forkedFrom   Repository?   @relation("RepositoryForks", fields: [forkedFromId], references: [id])
+    forks        Repository[]  @relation("RepositoryForks")
+    organization Organization? @relation(fields: [organizationId], references: [id])
+
+    branches      Branch[]
+    commits       Commit[]
+    tags          Tag[]
+    stars         Star[]
+    watchers      Watch[]
+    issues        Issue[]
+    pullRequests  PullRequest[]
+    collaborators Collaborator[]
+    activities    Activity[]
+
+    @@unique([ownerId, name])
+    @@index([ownerId])
+    @@index([name])
+    @@index([language])
+    @@index([isPrivate])
+    @@map("repositories")
+}
+
+model Star {
+    id           String   @id @default(uuid())
+    userId       String
+    repositoryId String
+    createdAt    DateTime @default(now())
+
+    user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+    repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+    @@unique([userId, repositoryId])
+    @@index([userId])
+    @@index([repositoryId])
+    @@map("stars")
+}
+
+model Watch {
+    id           String   @id @default(uuid())
+    userId       String
+    repositoryId String
+    createdAt    DateTime @default(now())
+
+    user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+    repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+    @@unique([userId, repositoryId])
+    @@index([userId])
+    @@index([repositoryId])
+    @@map("watches")
+}
+
+model Collaborator {
+    id           String          @id @default(uuid())
+    userId       String
+    repositoryId String
+    permission   PermissionLevel @default(READ)
+    createdAt    DateTime        @default(now())
+
+    user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+    repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+    @@unique([userId, repositoryId])
+    @@index([userId])
+    @@index([repositoryId])
+    @@map("collaborators")
+}
+
+// ============================================
+// GIT MODELS
+// ============================================
+
+model Branch {
+    id           String   @id @default(uuid())
+    name         String
+    repositoryId String
+    sha          String
+    isProtected  Boolean  @default(false)
+    createdAt    DateTime @default(now())
+    updatedAt    DateTime @updatedAt
+
+    repository   Repository    @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+    pullRequests PullRequest[]
+
+    @@unique([repositoryId, name])
+    @@index([repositoryId])
+    @@map("branches")
+}
+
+model Commit {
+    id           String   @id @default(uuid())
+    sha          String   @unique
+    message      String
+    repositoryId String
+    authorId     String
+    parentSha    String?
+    createdAt    DateTime @default(now())
+
+    repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+    author     User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+    @@index([repositoryId])
+    @@index([authorId])
+    @@index([sha])
+    @@map("commits")
+}
+
+model Tag {
+    id           String   @id @default(uuid())
+    name         String
+    repositoryId String
+    sha          String
+    message      String?
+    createdAt    DateTime @default(now())
+
+    repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+    @@unique([repositoryId, name])
+    @@index([repositoryId])
+    @@map("tags")
+}
+
+// ============================================
+// ISSUE MODELS
+// ============================================
+
+model Issue {
+    id           String     @id @default(uuid())
+    number       Int
+    title        String
+    body         String?
+    state        IssueState @default(OPEN)
+    repositoryId String
+    authorId     String
+    closedAt     DateTime?
+    createdAt    DateTime   @default(now())
+    updatedAt    DateTime   @updatedAt
+
+    repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+    author     User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+    assignees IssueAssignee[]
+    labels    IssueLabel[]
+    comments  IssueComment[]
+
+    @@unique([repositoryId, number])
+    @@index([repositoryId])
+    @@index([authorId])
+    @@index([state])
+    @@map("issues")
+}
+
+model IssueAssignee {
+    id        String   @id @default(uuid())
+    issueId   String
+    userId    String
+    createdAt DateTime @default(now())
+
+    issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+    user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@unique([issueId, userId])
+    @@index([issueId])
+    @@index([userId])
+    @@map("issue_assignees")
+}
+
+model Label {
+    id          String   @id @default(uuid())
+    name        String
+    color       String
+    description String?
+    createdAt   DateTime @default(now())
+
+    issues       IssueLabel[]
+    pullRequests PullRequestLabel[]
+
+    @@unique([name])
+    @@map("labels")
+}
+
+model IssueLabel {
+    id        String   @id @default(uuid())
+    issueId   String
+    labelId   String
+    createdAt DateTime @default(now())
+
+    issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+    label Label @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+    @@unique([issueId, labelId])
+    @@index([issueId])
+    @@index([labelId])
+    @@map("issue_labels")
+}
+
+model IssueComment {
+    id        String   @id @default(uuid())
+    body      String
+    issueId   String
+    authorId  String
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    issue  Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+    author User  @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+    @@index([issueId])
+    @@index([authorId])
+    @@map("issue_comments")
+}
+
+// ============================================
+// PULL REQUEST MODELS
+// ============================================
+
+model PullRequest {
+    id           String           @id @default(uuid())
+    number       Int
+    title        String
+    body         String?
+    state        PullRequestState @default(OPEN)
+    repositoryId String
+    authorId     String
+    headBranch   String
+    baseBranch   String
+    mergedAt     DateTime?
+    closedAt     DateTime?
+    createdAt    DateTime         @default(now())
+    updatedAt    DateTime         @updatedAt
+
+    repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+    author     User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
+    head       Branch     @relation(fields: [headBranch, repositoryId], references: [name, repositoryId])
+
+    assignees PullRequestAssignee[]
+    labels    PullRequestLabel[]
+    reviews   PullRequestReview[]
+    comments  PullRequestComment[]
+
+    @@unique([repositoryId, number])
+    @@index([repositoryId])
+    @@index([authorId])
+    @@index([state])
+    @@map("pull_requests")
+}
+
+model PullRequestAssignee {
+    id            String   @id @default(uuid())
+    pullRequestId String
+    userId        String
+    createdAt     DateTime @default(now())
+
+    pullRequest PullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+    user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@unique([pullRequestId, userId])
+    @@index([pullRequestId])
+    @@index([userId])
+    @@map("pull_request_assignees")
+}
+
+model PullRequestLabel {
+    id            String   @id @default(uuid())
+    pullRequestId String
+    labelId       String
+    createdAt     DateTime @default(now())
+
+    pullRequest PullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+    label       Label       @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+    @@unique([pullRequestId, labelId])
+    @@index([pullRequestId])
+    @@index([labelId])
+    @@map("pull_request_labels")
+}
+
+model PullRequestReview {
+    id            String      @id @default(uuid())
+    body          String?
+    state         ReviewState
+    pullRequestId String
+    reviewerId    String
+    createdAt     DateTime    @default(now())
+    updatedAt     DateTime    @updatedAt
+
+    pullRequest PullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+    reviewer    User        @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
+
+    @@index([pullRequestId])
+    @@index([reviewerId])
+    @@map("pull_request_reviews")
+}
+
+model PullRequestComment {
+    id            String   @id @default(uuid())
+    body          String
+    pullRequestId String
+    authorId      String
+    createdAt     DateTime @default(now())
+    updatedAt     DateTime @updatedAt
+
+    pullRequest PullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+    author      User        @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+    @@index([pullRequestId])
+    @@index([authorId])
+    @@map("pull_request_comments")
+}
+
+// ============================================
+// ORGANIZATION MODELS
+// ============================================
+
+model Organization {
+    id          String   @id @default(uuid())
+    name        String   @unique
+    displayName String
+    description String?
+    avatarUrl   String?
+    website     String?
+    location    String?
+    email       String?
+    ownerId     String
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    owner        User                 @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+    repositories Repository[]
+    members      OrganizationMember[]
+
+    @@index([name])
+    @@index([ownerId])
+    @@map("organizations")
+}
+
+model OrganizationMember {
+    id             String   @id @default(uuid())
+    organizationId String
+    userId         String
+    role           OrgRole  @default(MEMBER)
+    createdAt      DateTime @default(now())
+
+    organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+    @@unique([organizationId, userId])
+    @@index([organizationId])
+    @@index([userId])
+    @@map("organization_members")
+}
+
+// ============================================
+// NOTIFICATION & ACTIVITY MODELS
+// ============================================
+
+model Notification {
+    id        String           @id @default(uuid())
+    userId    String
+    type      NotificationType
+    title     String
+    message   String
+    isRead    Boolean          @default(false)
+    link      String?
+    createdAt DateTime         @default(now())
+
+    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@index([userId])
+    @@index([isRead])
+    @@map("notifications")
+}
+
+model Activity {
+    id           String       @id @default(uuid())
+    userId       String
+    repositoryId String?
+    type         ActivityType
+    metadata     Json?
+    createdAt    DateTime     @default(now())
+
+    user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+    repository Repository? @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+    @@index([userId])
+    @@index([repositoryId])
+    @@index([createdAt])
+    @@map("activities")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum PermissionLevel {
+    READ
+    WRITE
+    ADMIN
+}
+
+enum IssueState {
+    OPEN
+    CLOSED
+}
+
+enum PullRequestState {
+    OPEN
+    CLOSED
+    MERGED
+}
+
+enum ReviewState {
+    APPROVED
+    CHANGES_REQUESTED
+    COMMENTED
+    DISMISSED
+}
+
+enum OrgRole {
+    OWNER
+    ADMIN
+    MEMBER
+}
+
+enum NotificationType {
+    MENTION
+    ISSUE_ASSIGNED
+    PR_ASSIGNED
+    PR_REVIEW_REQUESTED
+    PR_MERGED
+    STAR
+    FOLLOW
+    COMMENT
+}
+
+enum ActivityType {
+    CREATED_REPO
+    FORKED_REPO
+    STARRED_REPO
+    CREATED_ISSUE
+    CLOSED_ISSUE
+    CREATED_PR
+    MERGED_PR
+    PUSHED_COMMITS
+    CREATED_BRANCH
+    CREATED_TAG
+    FOLLOWED_USER
+}
