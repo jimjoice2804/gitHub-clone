@@ -1,21 +1,36 @@
 import express, { Application, Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import config from './config';
+import routes from './routes';
+import { ApiError } from './types/index';
 
 const app: Application = express();
 
-// Basic middleware
+// Security middleware
+app.use(helmet());
+app.use(
+    cors({
+        origin: config.cors.origin,
+        credentials: true,
+    })
+);
+
+// Rate limiting
+const limiter = rateLimit({
+    windowMs: config.rateLimit.windowMs,
+    max: config.rateLimit.maxRequests,
+    message: 'Too many requests from this IP, please try again later.',
+});
+app.use('/api', limiter);
+
+// Body parsing middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Health check endpoint
-app.get('/health', (_req: Request, res: Response) => {
-    res.status(200).json({
-        success: true,
-        message: 'GitHub Clone API is running',
-        timestamp: new Date().toISOString(),
-        environment: config.server.env,
-    });
-});
+// API routes
+app.use('/api', routes);
 
 // Root endpoint
 app.get('/', (_req: Request, res: Response) => {
@@ -24,6 +39,10 @@ app.get('/', (_req: Request, res: Response) => {
         message: 'Welcome to GitHub Clone API',
         version: config.server.apiVersion,
         docs: '/api/docs',
+        endpoints: {
+            auth: '/api/auth',
+            health: '/api/health',
+        },
     });
 });
 
@@ -36,8 +55,17 @@ app.use((_req: Request, res: Response) => {
 });
 
 // Global error handler
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: Error | ApiError, _req: Request, res: Response, _next: NextFunction) => {
     console.error('Error:', err);
+
+    if (err instanceof ApiError) {
+        res.status(err.statusCode).json({
+            success: false,
+            message: err.message,
+        });
+        return;
+    }
+
     res.status(500).json({
         success: false,
         message: 'Internal server error',
