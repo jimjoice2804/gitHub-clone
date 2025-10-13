@@ -48,3 +48,8 @@ temp/
 
 # Git repositories (for cloned repos)
 repositories/
+
+# Documentation (Phase completion files)
+PHASE*.md
+*-COMPLETE.md
+AUTH-API-TESTING.md
