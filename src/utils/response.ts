@@ -3,7 +3,7 @@
  */
 
 import { Response } from 'express';
-import { ApiResponse, PaginatedResponse, PaginationMeta } from '@types/index';
+import { ApiResponse, PaginatedResponse, PaginationMeta } from '../types';
 
 /**
  * Send success response
