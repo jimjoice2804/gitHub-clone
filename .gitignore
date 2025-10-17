@@ -51,5 +51,5 @@ repositories/
 
 # Documentation (Phase completion files)
 PHASE*.md
-*-COMPLETE.md
+*COMPLETE.md
 AUTH-API-TESTING.md
