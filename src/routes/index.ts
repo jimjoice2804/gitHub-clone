@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import authRoutes from './auth.routes';
 import userRoutes from './user.routes';
+import repositoryRoutes from './repository.routes';
 
 const router = Router();
 
@@ -9,6 +10,7 @@ const router = Router();
  */
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
+router.use('/repos', repositoryRoutes);
 
 /**
  * Health check route
