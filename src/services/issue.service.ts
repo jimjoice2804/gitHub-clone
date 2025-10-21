@@ -1,6 +1,10 @@
 import db from '@config/database';
 import { IssueState, Prisma } from '@prisma/client';
 import { ApiError } from '../types/index';
+import { fetchUserIdentity, resolveDisplayName } from '../utils/user.util';
+import { extractMentions, resolveMentionRecipientIds } from '../utils/mention.util';
+import { createNotification } from './notification.service';
+import { recordActivity } from './activity.service';
 
 const userSelect = {
     id: true,
@@ -243,7 +247,73 @@ export const createIssue = async (
         return createdIssue.id;
     });
 
-    return loadIssueWithComments(issueId);
+    const issueData = await loadIssueWithComments(issueId);
+
+    const sideEffects: Promise<unknown>[] = [];
+    let cachedActorIdentity: Awaited<ReturnType<typeof fetchUserIdentity>> | undefined;
+    const ensureActorName = async () => {
+        if (!cachedActorIdentity) {
+            cachedActorIdentity = await fetchUserIdentity(userId);
+        }
+        return resolveDisplayName(cachedActorIdentity);
+    };
+
+    sideEffects.push(
+        recordActivity({
+            userId,
+            type: 'created_issue',
+            repositoryId: repository.id,
+            metadata: {
+                issueId,
+                issueNumber: issueData.number,
+                repositoryId: repository.id,
+            } as Prisma.JsonValue,
+        })
+    );
+
+    if (assigneeIds.length > 0) {
+        const actorName = await ensureActorName();
+        const notifications = assigneeIds
+            .filter((assigneeId) => assigneeId !== userId)
+            .map((assigneeId) =>
+                createNotification({
+                    userId: assigneeId,
+                    type: 'issue_assigned',
+                    title: `Assigned to issue #${issueData.number}`,
+                    message: `${actorName} assigned you to issue "${issueData.title}" in ${owner}/${repoName}`,
+                    link: `/repos/${owner}/${repoName}/issues/${issueData.number}`,
+                })
+            );
+
+        if (notifications.length > 0) {
+            sideEffects.push(Promise.all(notifications));
+        }
+    }
+
+    const mentionUsernames = extractMentions(data.body);
+    if (mentionUsernames.length > 0) {
+        const mentionRecipientIds = await resolveMentionRecipientIds(mentionUsernames, repository);
+        const mentionTargets = mentionRecipientIds.filter((recipientId) => recipientId !== userId);
+
+        if (mentionTargets.length > 0) {
+            const actorName = await ensureActorName();
+            const notifications = mentionTargets.map((recipientId) =>
+                createNotification({
+                    userId: recipientId,
+                    type: 'mention',
+                    title: `Mentioned in issue #${issueData.number}`,
+                    message: `${actorName} mentioned you in issue "${issueData.title}" in ${owner}/${repoName}`,
+                    link: `/repos/${owner}/${repoName}/issues/${issueData.number}`,
+                })
+            );
+
+            sideEffects.push(Promise.all(notifications));
+        }
+    }
+
+    await Promise.all(sideEffects);
+
+    return issueData;
 };
 
 export const listIssues = async (
@@ -403,7 +473,22 @@ export const updateIssueState = async (
         include: issueWithCommentsInclude,
     });
 
-    return mapIssueWithComments(updated);
+    const mapped = mapIssueWithComments(updated);
+
+    if (state === 'closed') {
+        await recordActivity({
+            userId,
+            type: 'closed_issue',
+            repositoryId: repository.id,
+            metadata: {
+                issueId: issue.id,
+                issueNumber: mapped.number,
+                repositoryId: repository.id,
+            } as Prisma.JsonValue,
+        });
+    }
+
+    return mapped;
 };
 
 export const setIssueAssignees = async (
@@ -421,6 +506,13 @@ export const setIssueAssignees = async (
     if (issue.authorId !== userId && repository.ownerId !== userId) {
         throw new ApiError(403, 'You do not have permission to update this issue');
     }
+
+    const existingAssignees = await db.issueAssignee.findMany({
+        where: { issueId: issue.id },
+        select: { userId: true },
+    });
+
+    const previousAssigneeIds = new Set(existingAssignees.map((assignment) => assignment.userId));
 
     const ids = dedupeIds(assigneeIds);
 
@@ -451,7 +543,31 @@ export const setIssueAssignees = async (
         }
     });
 
-    return loadIssueWithComments(issue.id);
+    const updatedIssue = await loadIssueWithComments(issue.id);
+
+    const newAssigneeIds = ids.filter((assigneeId) => !previousAssigneeIds.has(assigneeId));
+
+    if (newAssigneeIds.length > 0) {
+        const actorIdentity = await fetchUserIdentity(userId);
+        const actorName = resolveDisplayName(actorIdentity);
+        const notifications = newAssigneeIds
+            .filter((assigneeId) => assigneeId !== userId)
+            .map((assigneeId) =>
+                createNotification({
+                    userId: assigneeId,
+                    type: 'issue_assigned',
+                    title: `Assigned to issue #${issue.number}`,
+                    message: `${actorName} assigned you to issue "${issue.title}" in ${owner}/${repoName}`,
+                    link: `/repos/${owner}/${repoName}/issues/${issue.number}`,
+                })
+            );
+
+        if (notifications.length > 0) {
+            await Promise.all(notifications);
+        }
+    }
+
+    return updatedIssue;
 };
 
 export const setIssueLabels = async (
@@ -526,6 +642,67 @@ export const addIssueComment = async (
             },
         },
     });
+
+    const recipients = new Set<string>();
+    recipients.add(issue.authorId);
+
+    const assignees = await db.issueAssignee.findMany({
+        where: { issueId: issue.id },
+        select: { userId: true },
+    });
+
+    assignees.forEach((assignee) => recipients.add(assignee.userId));
+    recipients.delete(userId);
+
+    const mentionUsernames = extractMentions(body);
+    const mentionRecipientIds = await resolveMentionRecipientIds(mentionUsernames, repository);
+    const mentionTargets = mentionRecipientIds.filter((recipientId) => recipientId !== userId);
+
+    const commentRecipientIds = Array.from(recipients);
+    const mentionOnlyRecipientIds = mentionTargets.filter((recipientId) => !recipients.has(recipientId));
+
+    if (commentRecipientIds.length === 0 && mentionOnlyRecipientIds.length === 0) {
+        return mapComment(comment);
+    }
+
+    const actorIdentity = await fetchUserIdentity(userId);
+    const actorName = resolveDisplayName(actorIdentity);
+
+    const tasks: Promise<unknown>[] = [];
+
+    if (commentRecipientIds.length > 0) {
+        tasks.push(
+            Promise.all(
+                commentRecipientIds.map((recipientId) =>
+                    createNotification({
+                        userId: recipientId,
+                        type: 'comment',
+                        title: `New comment on issue #${issue.number}`,
+                        message: `${actorName} commented on issue "${issue.title}" in ${owner}/${repoName}`,
+                        link: `/repos/${owner}/${repoName}/issues/${issue.number}`,
+                    })
+                )
+            )
+        );
+    }
+
+    if (mentionOnlyRecipientIds.length > 0) {
+        tasks.push(
+            Promise.all(
+                mentionOnlyRecipientIds.map((recipientId) =>
+                    createNotification({
+                        userId: recipientId,
+                        type: 'mention',
+                        title: `Mentioned in issue #${issue.number}`,
+                        message: `${actorName} mentioned you in issue "${issue.title}" in ${owner}/${repoName}`,
+                        link: `/repos/${owner}/${repoName}/issues/${issue.number}`,
+                    })
+                )
+            )
+        );
+    }
+
+    await Promise.all(tasks);
 
     return mapComment(comment);
 };

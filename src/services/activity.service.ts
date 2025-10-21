@@ -13,7 +13,10 @@ const activityTypeValues = [
     'pushed_commits',
     'created_branch',
     'created_tag',
+    'deleted_tag',
     'followed_user',
+    'created_discussion',
+    'closed_discussion',
 ] as const;
 
 const isActivityTypeValue = (value: string): value is (typeof activityTypeValues)[number] =>
@@ -30,7 +33,10 @@ const apiToActivityType: Record<(typeof activityTypeValues)[number], ActivityTyp
     pushed_commits: ActivityType.PUSHED_COMMITS,
     created_branch: ActivityType.CREATED_BRANCH,
     created_tag: ActivityType.CREATED_TAG,
+    deleted_tag: ActivityType.DELETED_TAG,
     followed_user: ActivityType.FOLLOWED_USER,
+    created_discussion: ActivityType.CREATED_DISCUSSION,
+    closed_discussion: ActivityType.CLOSED_DISCUSSION,
 };
 
 const activityTypeToApi: Record<ActivityType, (typeof activityTypeValues)[number]> = {
@@ -44,7 +50,10 @@ const activityTypeToApi: Record<ActivityType, (typeof activityTypeValues)[number
     [ActivityType.PUSHED_COMMITS]: 'pushed_commits',
     [ActivityType.CREATED_BRANCH]: 'created_branch',
     [ActivityType.CREATED_TAG]: 'created_tag',
+    [ActivityType.DELETED_TAG]: 'deleted_tag',
     [ActivityType.FOLLOWED_USER]: 'followed_user',
+    [ActivityType.CREATED_DISCUSSION]: 'created_discussion',
+    [ActivityType.CLOSED_DISCUSSION]: 'closed_discussion',
 };
 
 const userSelect = {

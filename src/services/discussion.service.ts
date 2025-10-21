@@ -1,6 +1,10 @@
 import db from '@config/database';
 import { DiscussionState, Prisma } from '@prisma/client';
 import { ApiError } from '../types/index';
+import { fetchUserIdentity, resolveDisplayName } from '../utils/user.util';
+import { extractMentions, resolveMentionRecipientIds } from '../utils/mention.util';
+import { createNotification } from './notification.service';
+import { recordActivity } from './activity.service';
 
 const userSelect = {
     id: true,
@@ -215,7 +219,77 @@ export const createDiscussion = async (
         return created.id;
     });
 
-    return loadDiscussionWithComments(discussionId);
+    const discussionData = await loadDiscussionWithComments(discussionId);
+
+    const sideEffects: Promise<unknown>[] = [];
+    let cachedActorIdentity: Awaited<ReturnType<typeof fetchUserIdentity>> | undefined;
+    const ensureActorName = async () => {
+        if (!cachedActorIdentity) {
+            cachedActorIdentity = await fetchUserIdentity(userId);
+        }
+        return resolveDisplayName(cachedActorIdentity);
+    };
+
+    sideEffects.push(
+        recordActivity({
+            userId,
+            type: 'created_discussion',
+            repositoryId: repository.id,
+            metadata: {
+                discussionId,
+                discussionNumber: discussionData.number,
+                repositoryId: repository.id,
+            } as Prisma.JsonValue,
+        })
+    );
+
+    const notifiedRecipients = new Set<string>();
+
+    if (repository.ownerId !== userId) {
+        const actorName = await ensureActorName();
+        notifiedRecipients.add(repository.ownerId);
+        sideEffects.push(
+            createNotification({
+                userId: repository.ownerId,
+                type: 'comment',
+                title: `New discussion #${discussionData.number}`,
+                message: `${actorName} started the discussion "${discussionData.title}" in ${owner}/${repoName}`,
+                link: `/repos/${owner}/${repoName}/discussions/${discussionData.number}`,
+            })
+        );
+    }
+
+    const mentionUsernames = extractMentions(data.body);
+    if (mentionUsernames.length > 0) {
+        const mentionRecipientIds = await resolveMentionRecipientIds(mentionUsernames, repository);
+        const mentionTargets = mentionRecipientIds.filter(
+            (recipientId) => recipientId !== userId && !notifiedRecipients.has(recipientId)
+        );
+
+        if (mentionTargets.length > 0) {
+            const actorName = await ensureActorName();
+            sideEffects.push(
+                Promise.all(
+                    mentionTargets.map((recipientId) =>
+                        createNotification({
+                            userId: recipientId,
+                            type: 'mention',
+                            title: `Mentioned in discussion #${discussionData.number}`,
+                            message: `${actorName} mentioned you in discussion "${discussionData.title}" in ${owner}/${repoName}`,
+                            link: `/repos/${owner}/${repoName}/discussions/${discussionData.number}`,
+                        })
+                    )
+                )
+            );
+            mentionTargets.forEach((recipientId) => notifiedRecipients.add(recipientId));
+        }
+    }
+
+    if (sideEffects.length > 0) {
+        await Promise.all(sideEffects);
+    }
+
+    return discussionData;
 };
 
 export const listDiscussions = async (
@@ -354,7 +428,45 @@ export const updateDiscussionState = async (
         include: discussionWithCommentsInclude,
     });
 
-    return mapDiscussionWithComments(updated);
+    const mapped = mapDiscussionWithComments(updated);
+
+    const sideEffects: Promise<unknown>[] = [];
+
+    if (state === 'closed') {
+        sideEffects.push(
+            recordActivity({
+                userId,
+                type: 'closed_discussion',
+                repositoryId: repository.id,
+                metadata: {
+                    discussionId: discussion.id,
+                    discussionNumber: mapped.number,
+                    repositoryId: repository.id,
+                } as Prisma.JsonValue,
+            })
+        );
+    }
+
+    if (discussion.authorId !== userId) {
+        const actorIdentity = await fetchUserIdentity(userId);
+        const actorName = resolveDisplayName(actorIdentity);
+        const actionVerb = state === 'closed' ? 'closed' : 'reopened';
+        sideEffects.push(
+            createNotification({
+                userId: discussion.authorId,
+                type: 'comment',
+                title: `Discussion #${mapped.number} ${actionVerb}`,
+                message: `${actorName} ${actionVerb} discussion "${discussion.title}" in ${owner}/${repoName}`,
+                link: `/repos/${owner}/${repoName}/discussions/${mapped.number}`,
+            })
+        );
+    }
+
+    if (sideEffects.length > 0) {
+        await Promise.all(sideEffects);
+    }
+
+    return mapped;
 };
 
 export const addDiscussionComment = async (
@@ -372,15 +484,19 @@ export const addDiscussionComment = async (
 
     const discussion = await getDiscussionEntity(repository.id, discussionNumber);
 
+    let parentAuthorId: string | undefined;
+
     if (data.parentId) {
         const parent = await db.discussionComment.findUnique({
             where: { id: data.parentId },
-            select: { id: true, discussionId: true },
+            select: { id: true, discussionId: true, authorId: true },
         });
 
         if (!parent || parent.discussionId !== discussion.id) {
             throw new ApiError(400, 'Parent comment does not belong to this discussion');
         }
+
+        parentAuthorId = parent.authorId;
     }
 
     const comment = await db.discussionComment.create({
@@ -392,6 +508,65 @@ export const addDiscussionComment = async (
         },
         include: commentInclude,
     });
+
+    const recipients = new Set<string>();
+    recipients.add(discussion.authorId);
+    recipients.add(repository.ownerId);
+
+    if (parentAuthorId) {
+        recipients.add(parentAuthorId);
+    }
+
+    recipients.delete(userId);
+
+    const mentionUsernames = extractMentions(data.body);
+    const mentionRecipientIds = await resolveMentionRecipientIds(mentionUsernames, repository);
+    const mentionTargets = mentionRecipientIds.filter((recipientId) => recipientId !== userId);
+
+    const commentRecipientIds = Array.from(recipients);
+    const mentionOnlyRecipientIds = mentionTargets.filter((recipientId) => !recipients.has(recipientId));
+
+    if (commentRecipientIds.length > 0 || mentionOnlyRecipientIds.length > 0) {
+        const actorIdentity = await fetchUserIdentity(userId);
+        const actorName = resolveDisplayName(actorIdentity);
+        const tasks: Promise<unknown>[] = [];
+
+        if (commentRecipientIds.length > 0) {
+            tasks.push(
+                Promise.all(
+                    commentRecipientIds.map((recipientId) =>
+                        createNotification({
+                            userId: recipientId,
+                            type: 'comment',
+                            title: `New comment on discussion #${discussion.number}`,
+                            message: `${actorName} commented on discussion "${discussion.title}" in ${owner}/${repoName}`,
+                            link: `/repos/${owner}/${repoName}/discussions/${discussion.number}`,
+                        })
+                    )
+                )
+            );
+        }
+
+        if (mentionOnlyRecipientIds.length > 0) {
+            tasks.push(
+                Promise.all(
+                    mentionOnlyRecipientIds.map((recipientId) =>
+                        createNotification({
+                            userId: recipientId,
+                            type: 'mention',
+                            title: `Mentioned in discussion #${discussion.number}`,
+                            message: `${actorName} mentioned you in discussion "${discussion.title}" in ${owner}/${repoName}`,
+                            link: `/repos/${owner}/${repoName}/discussions/${discussion.number}`,
+                        })
+                    )
+                )
+            );
+        }
+
+        if (tasks.length > 0) {
+            await Promise.all(tasks);
+        }
+    }
 
     return mapComment(comment);
 };
@@ -523,6 +698,7 @@ export const listCommentReactions = async (
         select: {
             id: true,
             discussionId: true,
+            authorId: true,
         },
     });
 
@@ -557,6 +733,7 @@ export const addCommentReaction = async (
         select: {
             id: true,
             discussionId: true,
+            authorId: true,
         },
     });
 
@@ -586,6 +763,18 @@ export const addCommentReaction = async (
         },
         include: reactionInclude,
     });
+
+    if (comment.authorId && comment.authorId !== userId) {
+        const actorIdentity = await fetchUserIdentity(userId);
+        const actorName = resolveDisplayName(actorIdentity);
+        await createNotification({
+            userId: comment.authorId,
+            type: 'comment',
+            title: 'New reaction on your comment',
+            message: `${actorName} reacted to your comment in discussion "${discussion.title}" in ${owner}/${repoName}`,
+            link: `/repos/${owner}/${repoName}/discussions/${discussion.number}`,
+        });
+    }
 
     return mapReaction(reaction);
 };

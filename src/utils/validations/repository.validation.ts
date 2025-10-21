@@ -57,3 +57,16 @@ export const getUserReposSchema = z.object({
     page: z.string().regex(/^\d+$/).transform(Number).optional(),
     limit: z.string().regex(/^\d+$/).transform(Number).optional(),
 });
+
+/**
+ * Fork repository schema
+ */
+export const forkRepositorySchema = z.object({
+    name: z
+        .string()
+        .min(1, 'Repository name is required')
+        .max(100, 'Repository name must be at most 100 characters')
+        .regex(/^[a-zA-Z0-9_-]+$/, 'Repository name can only contain letters, numbers, hyphens, and underscores')
+        .optional(),
+    isPrivate: z.boolean().optional(),
+});

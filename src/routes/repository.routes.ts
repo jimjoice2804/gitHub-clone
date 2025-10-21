@@ -7,6 +7,7 @@ import {
     updateRepositorySchema,
     repoNameParamSchema,
     searchRepositoriesSchema,
+    forkRepositorySchema,
 } from '../utils/validations/repository.validation';
 
 const router = Router();
@@ -86,5 +87,28 @@ router.delete(
  * Get user repositories
  */
 router.get('/users/:username/repos', optionalAuthenticate, repositoryController.getUserRepositories);
+
+/**
+ * POST /api/repos/:owner/:repo/forks
+ * Fork a repository
+ */
+router.post(
+    '/:owner/:repo/forks',
+    authenticate,
+    validateParams(repoNameParamSchema),
+    validate(forkRepositorySchema),
+    repositoryController.forkRepository
+);
+
+/**
+ * GET /api/repos/:owner/:repo/forks
+ * Get repository forks
+ */
+router.get(
+    '/:owner/:repo/forks',
+    optionalAuthenticate,
+    validateParams(repoNameParamSchema),
+    repositoryController.getRepositoryForks
+);
 
 export default router;

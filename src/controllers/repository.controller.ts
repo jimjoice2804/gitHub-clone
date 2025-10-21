@@ -182,3 +182,43 @@ export const searchRepositories = async (req: Request, res: Response, next: Next
         next(error);
     }
 };
+
+/**
+ * Fork a repository
+ */
+export const forkRepository = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+        const { owner, repo } = req.params;
+        const userId = req.user!.userId;
+        const { name, isPrivate } = req.body;
+
+        const fork = await repositoryService.forkRepository(owner!, repo!, userId, {
+            name,
+            isPrivate,
+        });
+
+        sendSuccess(res, fork, 'Repository forked successfully', 201);
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * Get repository forks
+ */
+export const getRepositoryForks = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+        const { owner, repo } = req.params;
+        const requesterId = req.user?.userId;
+        const { page, limit } = req.query;
+
+        const result = await repositoryService.getRepositoryForks(owner!, repo!, requesterId, {
+            page: page ? parseInt(page as string, 10) : undefined,
+            limit: limit ? parseInt(limit as string, 10) : undefined,
+        });
+
+        sendSuccess(res, result, 'Forks retrieved successfully');
+    } catch (error) {
+        next(error);
+    }
+};

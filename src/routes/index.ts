@@ -7,6 +7,10 @@ import discussionRoutes from './discussion.routes';
 import notificationRoutes from './notification.routes';
 import activityRoutes from './activity.routes';
 import pullRequestRoutes from './pull-request.routes';
+import commitRoutes from './commit.routes';
+import branchRoutes from './branch.routes';
+import tagRoutes from './tag.routes';
+import collaboratorRoutes from './collaborator.routes';
 
 const router = Router();
 
@@ -19,6 +23,10 @@ router.use('/repos', repositoryRoutes);
 router.use('/repos', issueRoutes);
 router.use('/repos', discussionRoutes);
 router.use('/repos', pullRequestRoutes);
+router.use('/repos', commitRoutes);
+router.use('/repos', branchRoutes);
+router.use('/repos', tagRoutes);
+router.use('/repos', collaboratorRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/activities', activityRoutes);
 

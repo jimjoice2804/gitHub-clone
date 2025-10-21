@@ -1,6 +1,10 @@
 import db from '@config/database';
 import { PullRequestState, ReviewState, Prisma } from '@prisma/client';
 import { ApiError } from '../types/index';
+import { fetchUserIdentity, resolveDisplayName } from '../utils/user.util';
+import { extractMentions, resolveMentionRecipientIds } from '../utils/mention.util';
+import { createNotification } from './notification.service';
+import { recordActivity } from './activity.service';
 
 const userSelect = {
     id: true,
@@ -339,7 +343,73 @@ export const createPullRequest = async (
         throw new ApiError(404, 'Pull request not found');
     }
 
-    return mapPullRequestWithDetails(pullRequest);
+    const mapped = mapPullRequestWithDetails(pullRequest);
+
+    const sideEffects: Promise<unknown>[] = [];
+    let cachedActorIdentity: Awaited<ReturnType<typeof fetchUserIdentity>> | undefined;
+    const ensureActorName = async () => {
+        if (!cachedActorIdentity) {
+            cachedActorIdentity = await fetchUserIdentity(userId);
+        }
+        return resolveDisplayName(cachedActorIdentity);
+    };
+
+    sideEffects.push(
+        recordActivity({
+            userId,
+            type: 'created_pr',
+            repositoryId: repository.id,
+            metadata: {
+                pullRequestId: pullRequest.id,
+                pullNumber: mapped.number,
+                repositoryId: repository.id,
+            } as Prisma.JsonValue,
+        })
+    );
+
+    if (assigneeIds.length > 0) {
+        const actorName = await ensureActorName();
+        const notifications = assigneeIds
+            .filter((assigneeId) => assigneeId !== userId)
+            .map((assigneeId) =>
+                createNotification({
+                    userId: assigneeId,
+                    type: 'pr_assigned',
+                    title: `Assigned to pull request #${mapped.number}`,
+                    message: `${actorName} assigned you to pull request "${mapped.title}" in ${owner}/${repoName}`,
+                    link: `/repos/${owner}/${repoName}/pulls/${mapped.number}`,
+                })
+            );
+
+        if (notifications.length > 0) {
+            sideEffects.push(Promise.all(notifications));
+        }
+    }
+
+    const mentionUsernames = extractMentions(data.body);
+    if (mentionUsernames.length > 0) {
+        const mentionRecipientIds = await resolveMentionRecipientIds(mentionUsernames, repository);
+        const mentionTargets = mentionRecipientIds.filter((recipientId) => recipientId !== userId);
+
+        if (mentionTargets.length > 0) {
+            const actorName = await ensureActorName();
+            const notifications = mentionTargets.map((recipientId) =>
+                createNotification({
+                    userId: recipientId,
+                    type: 'mention',
+                    title: `Mentioned in pull request #${mapped.number}`,
+                    message: `${actorName} mentioned you in pull request "${mapped.title}" in ${owner}/${repoName}`,
+                    link: `/repos/${owner}/${repoName}/pulls/${mapped.number}`,
+                })
+            );
+
+            sideEffects.push(Promise.all(notifications));
+        }
+    }
+
+    await Promise.all(sideEffects);
+
+    return mapped;
 };
 
 export const listPullRequests = async (
@@ -529,7 +599,55 @@ export const updatePullRequestState = async (
         include: pullRequestWithDetailsInclude,
     });
 
-    return mapPullRequestWithDetails(updated);
+    const mapped = mapPullRequestWithDetails(updated);
+
+    if (state === 'merged') {
+        const sideEffects: Promise<unknown>[] = [];
+
+        sideEffects.push(
+            recordActivity({
+                userId,
+                type: 'merged_pr',
+                repositoryId: repository.id,
+                metadata: {
+                    pullRequestId: pullRequest.id,
+                    pullNumber: mapped.number,
+                    repositoryId: repository.id,
+                } as Prisma.JsonValue,
+            })
+        );
+
+        const recipients = new Set<string>();
+        recipients.add(pullRequest.authorId);
+
+        const assignees = await db.pullRequestAssignee.findMany({
+            where: { pullRequestId: pullRequest.id },
+            select: { userId: true },
+        });
+
+        assignees.forEach((assignee) => recipients.add(assignee.userId));
+        recipients.delete(userId);
+
+        if (recipients.size > 0) {
+            const actorIdentity = await fetchUserIdentity(userId);
+            const actorName = resolveDisplayName(actorIdentity);
+            const notifications = Array.from(recipients).map((recipientId) =>
+                createNotification({
+                    userId: recipientId,
+                    type: 'pr_merged',
+                    title: `Pull request #${mapped.number} merged`,
+                    message: `${actorName} merged pull request "${mapped.title}" in ${owner}/${repoName}`,
+                    link: `/repos/${owner}/${repoName}/pulls/${mapped.number}`,
+                })
+            );
+
+            sideEffects.push(Promise.all(notifications));
+        }
+
+        await Promise.all(sideEffects);
+    }
+
+    return mapped;
 };
 
 export const setPullRequestAssignees = async (
@@ -547,6 +665,13 @@ export const setPullRequestAssignees = async (
     if (pullRequest.authorId !== userId && repository.ownerId !== userId) {
         throw new ApiError(403, 'You do not have permission to update this pull request');
     }
+
+    const existingAssignees = await db.pullRequestAssignee.findMany({
+        where: { pullRequestId: pullRequest.id },
+        select: { userId: true },
+    });
+
+    const previousAssigneeIds = new Set(existingAssignees.map((assignment) => assignment.userId));
 
     const ids = dedupeIds(assigneeIds);
 
@@ -586,7 +711,31 @@ export const setPullRequestAssignees = async (
         throw new ApiError(404, 'Pull request not found');
     }
 
-    return mapPullRequestWithDetails(updated);
+    const mapped = mapPullRequestWithDetails(updated);
+
+    const newAssigneeIds = ids.filter((assigneeId) => !previousAssigneeIds.has(assigneeId));
+
+    if (newAssigneeIds.length > 0) {
+        const actorIdentity = await fetchUserIdentity(userId);
+        const actorName = resolveDisplayName(actorIdentity);
+        const notifications = newAssigneeIds
+            .filter((assigneeId) => assigneeId !== userId)
+            .map((assigneeId) =>
+                createNotification({
+                    userId: assigneeId,
+                    type: 'pr_assigned',
+                    title: `Assigned to pull request #${pullRequest.number}`,
+                    message: `${actorName} assigned you to pull request "${pullRequest.title}" in ${owner}/${repoName}`,
+                    link: `/repos/${owner}/${repoName}/pulls/${pullRequest.number}`,
+                })
+            );
+
+        if (notifications.length > 0) {
+            await Promise.all(notifications);
+        }
+    }
+
+    return mapped;
 };
 
 export const setPullRequestLabels = async (
@@ -670,6 +819,66 @@ export const addPullRequestComment = async (
             },
         },
     });
+
+    const recipients = new Set<string>();
+    recipients.add(pullRequest.authorId);
+    recipients.add(repository.ownerId);
+
+    const assignees = await db.pullRequestAssignee.findMany({
+        where: { pullRequestId: pullRequest.id },
+        select: { userId: true },
+    });
+
+    assignees.forEach((assignee) => recipients.add(assignee.userId));
+    recipients.delete(userId);
+
+    const mentionUsernames = extractMentions(body);
+    const mentionRecipientIds = await resolveMentionRecipientIds(mentionUsernames, repository);
+    const mentionTargets = mentionRecipientIds.filter((recipientId) => recipientId !== userId);
+
+    const commentRecipientIds = Array.from(recipients);
+    const mentionOnlyRecipientIds = mentionTargets.filter((recipientId) => !recipients.has(recipientId));
+
+    if (commentRecipientIds.length > 0 || mentionOnlyRecipientIds.length > 0) {
+        const actorIdentity = await fetchUserIdentity(userId);
+        const actorName = resolveDisplayName(actorIdentity);
+
+        const tasks: Promise<unknown>[] = [];
+
+        if (commentRecipientIds.length > 0) {
+            tasks.push(
+                Promise.all(
+                    commentRecipientIds.map((recipientId) =>
+                        createNotification({
+                            userId: recipientId,
+                            type: 'comment',
+                            title: `New comment on pull request #${pullRequest.number}`,
+                            message: `${actorName} commented on pull request "${pullRequest.title}" in ${owner}/${repoName}`,
+                            link: `/repos/${owner}/${repoName}/pulls/${pullRequest.number}`,
+                        })
+                    )
+                )
+            );
+        }
+
+        if (mentionOnlyRecipientIds.length > 0) {
+            tasks.push(
+                Promise.all(
+                    mentionOnlyRecipientIds.map((recipientId) =>
+                        createNotification({
+                            userId: recipientId,
+                            type: 'mention',
+                            title: `Mentioned in pull request #${pullRequest.number}`,
+                            message: `${actorName} mentioned you in pull request "${pullRequest.title}" in ${owner}/${repoName}`,
+                            link: `/repos/${owner}/${repoName}/pulls/${pullRequest.number}`,
+                        })
+                    )
+                )
+            );
+        }
+
+        await Promise.all(tasks);
+    }
 
     return mapComment(comment);
 };
@@ -830,6 +1039,66 @@ export const createPullRequestReview = async (
             },
         },
     });
+
+    const recipients = new Set<string>();
+    recipients.add(pullRequest.authorId);
+    recipients.add(repository.ownerId);
+
+    const assignees = await db.pullRequestAssignee.findMany({
+        where: { pullRequestId: pullRequest.id },
+        select: { userId: true },
+    });
+
+    assignees.forEach((assignee) => recipients.add(assignee.userId));
+    recipients.delete(userId);
+
+    const mentionUsernames = extractMentions(data.body);
+    const mentionRecipientIds = await resolveMentionRecipientIds(mentionUsernames, repository);
+    const mentionTargets = mentionRecipientIds.filter((recipientId) => recipientId !== userId);
+
+    const reviewRecipientIds = Array.from(recipients);
+    const mentionOnlyRecipientIds = mentionTargets.filter((recipientId) => !recipients.has(recipientId));
+
+    if (reviewRecipientIds.length > 0 || mentionOnlyRecipientIds.length > 0) {
+        const actorIdentity = await fetchUserIdentity(userId);
+        const actorName = resolveDisplayName(actorIdentity);
+
+        const tasks: Promise<unknown>[] = [];
+
+        if (reviewRecipientIds.length > 0) {
+            tasks.push(
+                Promise.all(
+                    reviewRecipientIds.map((recipientId) =>
+                        createNotification({
+                            userId: recipientId,
+                            type: 'comment',
+                            title: `New review on pull request #${pullRequest.number}`,
+                            message: `${actorName} submitted a review on pull request "${pullRequest.title}" in ${owner}/${repoName}`,
+                            link: `/repos/${owner}/${repoName}/pulls/${pullRequest.number}`,
+                        })
+                    )
+                )
+            );
+        }
+
+        if (mentionOnlyRecipientIds.length > 0) {
+            tasks.push(
+                Promise.all(
+                    mentionOnlyRecipientIds.map((recipientId) =>
+                        createNotification({
+                            userId: recipientId,
+                            type: 'mention',
+                            title: `Mentioned in pull request #${pullRequest.number}`,
+                            message: `${actorName} mentioned you in a review on pull request "${pullRequest.title}" in ${owner}/${repoName}`,
+                            link: `/repos/${owner}/${repoName}/pulls/${pullRequest.number}`,
+                        })
+                    )
+                )
+            );
+        }
+
+        await Promise.all(tasks);
+    }
 
     return mapReview(review);
 };

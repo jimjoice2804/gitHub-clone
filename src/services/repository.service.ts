@@ -686,3 +686,254 @@ export const searchRepositories = async (
         },
     };
 };
+
+/**
+ * Fork a repository
+ */
+export const forkRepository = async (
+    owner: string,
+    repoName: string,
+    userId: string,
+    data?: {
+        name?: string;
+        isPrivate?: boolean;
+    }
+) => {
+    const ownerUser = await db.user.findUnique({
+        where: { username: owner },
+        select: { id: true },
+    });
+
+    if (!ownerUser) {
+        throw new ApiError(404, 'Owner not found');
+    }
+
+    const sourceRepository = await db.repository.findFirst({
+        where: {
+            ownerId: ownerUser.id,
+            name: repoName,
+        },
+        include: {
+            branches: true,
+            commits: true,
+            tags: true,
+        },
+    });
+
+    if (!sourceRepository) {
+        throw new ApiError(404, 'Repository not found');
+    }
+
+    if (sourceRepository.isPrivate && sourceRepository.ownerId !== userId) {
+        throw new ApiError(403, 'You do not have access to this repository');
+    }
+
+    const forkingUser = await db.user.findUnique({
+        where: { id: userId },
+        select: { username: true },
+    });
+
+    if (!forkingUser) {
+        throw new ApiError(404, 'User not found');
+    }
+
+    const forkName = data?.name || repoName;
+
+    const existing = await db.repository.findFirst({
+        where: {
+            ownerId: userId,
+            name: forkName,
+        },
+    });
+
+    if (existing) {
+        throw new ApiError(400, 'You already have a repository with this name');
+    }
+
+    const fork = await db.$transaction(async (tx) => {
+        const forked = await tx.repository.create({
+            data: {
+                name: forkName,
+                description: sourceRepository.description,
+                isPrivate: data?.isPrivate ?? false,
+                language: sourceRepository.language,
+                ownerId: userId,
+                forkedFromId: sourceRepository.id,
+                gitUrl: `/repos/${forkingUser.username}/${forkName}.git`,
+                defaultBranch: sourceRepository.defaultBranch,
+            },
+            include: {
+                owner: {
+                    select: {
+                        id: true,
+                        username: true,
+                        name: true,
+                        avatarUrl: true,
+                    },
+                },
+                forkedFrom: {
+                    select: {
+                        id: true,
+                        name: true,
+                        owner: {
+                            select: {
+                                username: true,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+        if (sourceRepository.branches.length > 0) {
+            await tx.branch.createMany({
+                data: sourceRepository.branches.map((branch) => ({
+                    name: branch.name,
+                    sha: branch.sha,
+                    isProtected: branch.name === sourceRepository.defaultBranch,
+                    repositoryId: forked.id,
+                })),
+            });
+        }
+
+        if (sourceRepository.commits.length > 0) {
+            await tx.commit.createMany({
+                data: sourceRepository.commits.map((commit) => ({
+                    sha: commit.sha,
+                    message: commit.message,
+                    parentSha: commit.parentSha,
+                    repositoryId: forked.id,
+                    authorId: commit.authorId,
+                    createdAt: commit.createdAt,
+                })),
+            });
+        }
+
+        if (sourceRepository.tags.length > 0) {
+            await tx.tag.createMany({
+                data: sourceRepository.tags.map((tag) => ({
+                    name: tag.name,
+                    sha: tag.sha,
+                    message: tag.message,
+                    repositoryId: forked.id,
+                    createdAt: tag.createdAt,
+                })),
+            });
+        }
+
+        await tx.repository.update({
+            where: { id: sourceRepository.id },
+            data: { forksCount: { increment: 1 } },
+        });
+
+        return forked;
+    });
+
+    await db.activity.create({
+        data: {
+            userId,
+            type: 'FORKED_REPO',
+            repositoryId: fork.id,
+            metadata: {
+                sourceRepositoryId: sourceRepository.id,
+                sourceOwner: owner,
+                sourceRepo: repoName,
+            },
+        },
+    });
+
+    return fork;
+};
+
+/**
+ * Get repository forks
+ */
+export const getRepositoryForks = async (
+    owner: string,
+    repoName: string,
+    requesterId?: string,
+    options?: {
+        page?: number;
+        limit?: number;
+    }
+) => {
+    const ownerUser = await db.user.findUnique({
+        where: { username: owner },
+        select: { id: true },
+    });
+
+    if (!ownerUser) {
+        throw new ApiError(404, 'Owner not found');
+    }
+
+    const repository = await db.repository.findFirst({
+        where: {
+            ownerId: ownerUser.id,
+            name: repoName,
+        },
+    });
+
+    if (!repository) {
+        throw new ApiError(404, 'Repository not found');
+    }
+
+    if (repository.isPrivate && repository.ownerId !== requesterId) {
+        throw new ApiError(403, 'You do not have access to this repository');
+    }
+
+    const page = options?.page || 1;
+    const limit = options?.limit || 20;
+    const skip = (page - 1) * limit;
+
+    const [forks, total] = await Promise.all([
+        db.repository.findMany({
+            where: {
+                forkedFromId: repository.id,
+                isPrivate: false,
+            },
+            skip,
+            take: limit,
+            orderBy: { createdAt: 'desc' },
+            include: {
+                owner: {
+                    select: {
+                        id: true,
+                        username: true,
+                        name: true,
+                        avatarUrl: true,
+                    },
+                },
+                _count: {
+                    select: {
+                        stars: true,
+                        watchers: true,
+                        forks: true,
+                    },
+                },
+            },
+        }),
+        db.repository.count({
+            where: {
+                forkedFromId: repository.id,
+                isPrivate: false,
+            },
+        }),
+    ]);
+
+    return {
+        forks: forks.map((fork) => ({
+            ...fork,
+            stats: {
+                stars: fork._count.stars,
+                watchers: fork._count.watchers,
+                forks: fork._count.forks,
+            },
+        })),
+        pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit),
+        },
+    };
+};
