@@ -11,6 +11,8 @@ import commitRoutes from './commit.routes';
 import branchRoutes from './branch.routes';
 import tagRoutes from './tag.routes';
 import collaboratorRoutes from './collaborator.routes';
+import labelRoutes from './label.routes';
+import organizationRoutes from './organization.routes';
 
 const router = Router();
 
@@ -29,6 +31,8 @@ router.use('/repos', tagRoutes);
 router.use('/repos', collaboratorRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/activities', activityRoutes);
+router.use('/labels', labelRoutes);
+router.use('/orgs', organizationRoutes);
 
 /**
  * Health check route

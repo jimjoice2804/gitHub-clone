@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import * as userController from '@controllers/user.controller';
+import * as organizationController from '@controllers/organization.controller';
 import { authenticate, optionalAuthenticate } from '@middleware/auth.middleware';
 import { validate, validateQuery, validateParams } from '@middleware/validate.middleware';
 import {
@@ -76,6 +77,17 @@ router.get(
     validateParams(usernameParamSchema),
     validateQuery(paginationSchema),
     userController.getFollowing,
+);
+
+/**
+ * @route   GET /api/users/:username/orgs
+ * @desc    Get user's organizations
+ * @access  Public
+ */
+router.get(
+    '/:username/orgs',
+    validateParams(usernameParamSchema),
+    organizationController.listUserOrganizations,
 );
 
 export default router;
