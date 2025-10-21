@@ -4,8 +4,8 @@ import * as discussionService from '../services/discussion.service';
 import { sendSuccess } from '../utils/response';
 import { ApiError } from '../types/index';
 
-const parseDiscussionNumber = (discussionNumber: string): number => {
-    const parsed = parseInt(discussionNumber, 10);
+const parseDiscussionNumber = (rawDiscussionNumber: string): number => {
+    const parsed = parseInt(rawDiscussionNumber, 10);
     if (Number.isNaN(parsed)) {
         throw new ApiError(400, 'Invalid discussion number');
     }
@@ -16,12 +16,11 @@ export const createDiscussion = async (req: AuthRequest, res: Response, next: Ne
     try {
         const { owner, repo } = req.params;
         const userId = req.user!.userId;
-        const { title, body, category } = req.body;
+        const { title, body } = req.body;
 
         const discussion = await discussionService.createDiscussion(owner!, repo!, userId, {
             title,
             body,
-            category,
         });
 
         sendSuccess(res, discussion, 'Discussion created successfully', 201);
@@ -34,10 +33,10 @@ export const listDiscussions = async (req: AuthRequest, res: Response, next: Nex
     try {
         const { owner, repo } = req.params;
         const requesterId = req.user?.userId;
-        const { category, author, search, page, limit } = req.query;
+        const { state, author, search, page, limit } = req.query;
 
         const result = await discussionService.listDiscussions(owner!, repo!, requesterId, {
-            category: category as 'general' | 'qanda' | 'show_and_tell' | 'ideas' | undefined,
+            state: state as 'open' | 'closed' | undefined,
             authorId: author as string | undefined,
             search: search as string | undefined,
             page: page ? parseInt(page as string, 10) : undefined,
@@ -56,7 +55,12 @@ export const getDiscussion = async (req: AuthRequest, res: Response, next: NextF
         const requesterId = req.user?.userId;
         const parsedDiscussionNumber = parseDiscussionNumber(discussionNumber!);
 
-        const discussion = await discussionService.getDiscussion(owner!, repo!, parsedDiscussionNumber, requesterId);
+        const discussion = await discussionService.getDiscussion(
+            owner!,
+            repo!,
+            parsedDiscussionNumber,
+            requesterId
+        );
 
         sendSuccess(res, discussion, 'Discussion retrieved successfully');
     } catch (error) {
@@ -69,12 +73,11 @@ export const updateDiscussion = async (req: AuthRequest, res: Response, next: Ne
         const { owner, repo, discussionNumber } = req.params;
         const userId = req.user!.userId;
         const parsedDiscussionNumber = parseDiscussionNumber(discussionNumber!);
-        const { title, body, category } = req.body;
+        const { title, body } = req.body;
 
         const discussion = await discussionService.updateDiscussion(owner!, repo!, parsedDiscussionNumber, userId, {
             title,
             body,
-            category,
         });
 
         sendSuccess(res, discussion, 'Discussion updated successfully');
@@ -83,15 +86,22 @@ export const updateDiscussion = async (req: AuthRequest, res: Response, next: Ne
     }
 };
 
-export const deleteDiscussion = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+export const updateDiscussionState = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
     try {
         const { owner, repo, discussionNumber } = req.params;
         const userId = req.user!.userId;
         const parsedDiscussionNumber = parseDiscussionNumber(discussionNumber!);
+        const { state } = req.body as { state: 'open' | 'closed' };
 
-        const result = await discussionService.deleteDiscussion(owner!, repo!, parsedDiscussionNumber, userId);
+        const discussion = await discussionService.updateDiscussionState(
+            owner!,
+            repo!,
+            parsedDiscussionNumber,
+            userId,
+            state
+        );
 
-        sendSuccess(res, result, 'Discussion deleted successfully');
+        sendSuccess(res, discussion, 'Discussion state updated successfully');
     } catch (error) {
         next(error);
     }
@@ -102,9 +112,12 @@ export const addDiscussionComment = async (req: AuthRequest, res: Response, next
         const { owner, repo, discussionNumber } = req.params;
         const userId = req.user!.userId;
         const parsedDiscussionNumber = parseDiscussionNumber(discussionNumber!);
-        const { body } = req.body;
+        const { body, parentId } = req.body;
 
-        const comment = await discussionService.addDiscussionComment(owner!, repo!, parsedDiscussionNumber, userId, body);
+        const comment = await discussionService.addDiscussionComment(owner!, repo!, parsedDiscussionNumber, userId, {
+            body,
+            parentId,
+        });
 
         sendSuccess(res, comment, 'Comment added successfully', 201);
     } catch (error) {
@@ -130,7 +143,11 @@ export const listDiscussionComments = async (req: AuthRequest, res: Response, ne
     }
 };
 
-export const updateDiscussionComment = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+export const updateDiscussionComment = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
     try {
         const { owner, repo, discussionNumber, commentId } = req.params;
         const userId = req.user!.userId;
@@ -152,7 +169,11 @@ export const updateDiscussionComment = async (req: AuthRequest, res: Response, n
     }
 };
 
-export const deleteDiscussionComment = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+export const deleteDiscussionComment = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+): Promise<void> => {
     try {
         const { owner, repo, discussionNumber, commentId } = req.params;
         const userId = req.user!.userId;
@@ -171,3 +192,67 @@ export const deleteDiscussionComment = async (req: AuthRequest, res: Response, n
         next(error);
     }
 };
+
+export const listCommentReactions = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+        const { owner, repo, discussionNumber, commentId } = req.params;
+        const requesterId = req.user?.userId;
+        const parsedDiscussionNumber = parseDiscussionNumber(discussionNumber!);
+
+        const reactions = await discussionService.listCommentReactions(
+            owner!,
+            repo!,
+            parsedDiscussionNumber,
+            commentId!,
+            requesterId
+        );
+
+        sendSuccess(res, reactions, 'Reactions retrieved successfully');
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const addCommentReaction = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+        const { owner, repo, discussionNumber, commentId } = req.params;
+        const userId = req.user!.userId;
+        const parsedDiscussionNumber = parseDiscussionNumber(discussionNumber!);
+        const { emoji } = req.body as { emoji: string };
+
+        const reaction = await discussionService.addCommentReaction(
+            owner!,
+            repo!,
+            parsedDiscussionNumber,
+            commentId!,
+            userId,
+            emoji
+        );
+
+        sendSuccess(res, reaction, 'Reaction added successfully', 201);
+    } catch (error) {
+        next(error);
+    }
+};
+
+export const removeCommentReaction = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    try {
+        const { owner, repo, discussionNumber, commentId, reactionId } = req.params;
+        const userId = req.user!.userId;
+        const parsedDiscussionNumber = parseDiscussionNumber(discussionNumber!);
+
+        const result = await discussionService.removeCommentReaction(
+            owner!,
+            repo!,
+            parsedDiscussionNumber,
+            commentId!,
+            reactionId!,
+            userId
+        );
+
+        sendSuccess(res, result, 'Reaction removed successfully');
+    } catch (error) {
+        next(error);
+    }
+};
+

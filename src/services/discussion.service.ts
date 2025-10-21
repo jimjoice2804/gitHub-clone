@@ -1,5 +1,5 @@
 import db from '@config/database';
-import { DiscussionCategory, Prisma } from '@prisma/client';
+import { DiscussionState, Prisma } from '@prisma/client';
 import { ApiError } from '../types/index';
 
 const userSelect = {
@@ -8,6 +8,26 @@ const userSelect = {
     name: true,
     avatarUrl: true,
 } as const;
+
+const reactionInclude = {
+    user: {
+        select: userSelect,
+    },
+} satisfies Prisma.CommentReactionInclude;
+
+const commentInclude = {
+    author: {
+        select: userSelect,
+    },
+    reactions: {
+        include: reactionInclude,
+    },
+    replies: {
+        select: {
+            id: true,
+        },
+    },
+} satisfies Prisma.DiscussionCommentInclude;
 
 const discussionBaseInclude = {
     author: {
@@ -23,80 +43,55 @@ const discussionBaseInclude = {
 const discussionWithCommentsInclude = {
     ...discussionBaseInclude,
     comments: {
-        orderBy: { createdAt: 'asc' },
-        include: {
-            author: {
-                select: userSelect,
-            },
+        orderBy: {
+            createdAt: 'asc',
         },
+        include: commentInclude,
     },
 } satisfies Prisma.DiscussionInclude;
 
 type DiscussionWithBase = Prisma.DiscussionGetPayload<{ include: typeof discussionBaseInclude }>;
 type DiscussionWithComments = Prisma.DiscussionGetPayload<{ include: typeof discussionWithCommentsInclude }>;
-type DiscussionCommentWithAuthor = Prisma.DiscussionCommentGetPayload<{
-    include: {
-        author: {
-            select: typeof userSelect;
-        };
-    };
-}>;
+type DiscussionCommentWithRelations = Prisma.DiscussionCommentGetPayload<{ include: typeof commentInclude }>;
+type CommentReactionWithUser = Prisma.CommentReactionGetPayload<{ include: typeof reactionInclude }>;
 
-const mapCategoryToEnum = (category?: string | null): DiscussionCategory | undefined => {
-    if (!category) {
-        return undefined;
-    }
+const mapState = (state: DiscussionState): 'open' | 'closed' =>
+    state === DiscussionState.CLOSED ? 'closed' : 'open';
 
-    switch (category.toLowerCase()) {
-        case 'general':
-            return DiscussionCategory.GENERAL;
-        case 'qanda':
-            return DiscussionCategory.QANDA;
-        case 'show_and_tell':
-            return DiscussionCategory.SHOW_AND_TELL;
-        case 'ideas':
-            return DiscussionCategory.IDEAS;
-        default:
-            return undefined;
-    }
-};
+const mapReaction = (reaction: CommentReactionWithUser) => ({
+    id: reaction.id,
+    emoji: reaction.emoji,
+    user: reaction.user,
+    createdAt: reaction.createdAt,
+});
 
-const mapCategoryFromEnum = (category: DiscussionCategory): 'general' | 'qanda' | 'show_and_tell' | 'ideas' => {
-    switch (category) {
-        case DiscussionCategory.QANDA:
-            return 'qanda';
-        case DiscussionCategory.SHOW_AND_TELL:
-            return 'show_and_tell';
-        case DiscussionCategory.IDEAS:
-            return 'ideas';
-        default:
-            return 'general';
-    }
-};
-
-const mapComment = (comment: DiscussionCommentWithAuthor) => ({
+const mapComment = (comment: DiscussionCommentWithRelations) => ({
     id: comment.id,
     body: comment.body,
+    parentId: comment.parentId,
     author: comment.author,
     createdAt: comment.createdAt,
     updatedAt: comment.updatedAt,
+    reactions: comment.reactions.map(mapReaction),
+    repliesCount: comment.replies.length,
 });
 
-const mapDiscussionBase = (discussion: DiscussionWithBase) => ({
+const mapDiscussion = (discussion: DiscussionWithBase) => ({
     id: discussion.id,
     number: discussion.number,
     title: discussion.title,
     body: discussion.body,
-    category: mapCategoryFromEnum(discussion.category),
+    state: mapState(discussion.state),
     repositoryId: discussion.repositoryId,
     author: discussion.author,
+    closedAt: discussion.closedAt,
     createdAt: discussion.createdAt,
     updatedAt: discussion.updatedAt,
     commentsCount: discussion._count.comments,
 });
 
 const mapDiscussionWithComments = (discussion: DiscussionWithComments) => ({
-    ...mapDiscussionBase(discussion),
+    ...mapDiscussion(discussion),
     comments: discussion.comments.map(mapComment),
 });
 
@@ -129,7 +124,7 @@ const findRepositoryByOwnerAndName = async (owner: string, repoName: string) => 
     return repository;
 };
 
-const ensureRepositoryAccess = (repository: { ownerId: string; isPrivate: boolean }, requesterId?: string) => {
+const ensureRepositoryReadAccess = (repository: { ownerId: string; isPrivate: boolean }, requesterId?: string) => {
     if (repository.isPrivate && repository.ownerId !== requesterId) {
         throw new ApiError(403, 'You do not have access to this repository');
     }
@@ -150,49 +145,23 @@ const getDiscussionEntity = async (repositoryId: string, discussionNumber: numbe
     return discussion;
 };
 
-export const createDiscussion = async (
-    owner: string,
-    repoName: string,
-    userId: string,
-    data: {
-        title: string;
-        body?: string;
-        category?: 'general' | 'qanda' | 'show_and_tell' | 'ideas';
+const ensureDiscussionWritable = (discussion: { authorId: string }, repository: { ownerId: string }, userId: string) => {
+    if (discussion.authorId !== userId && repository.ownerId !== userId) {
+        throw new ApiError(403, 'You do not have permission to modify this discussion');
     }
+};
+
+const ensureCommentWritable = (
+    comment: { authorId: string },
+    repository: { ownerId: string },
+    userId: string
 ) => {
-    const repository = await findRepositoryByOwnerAndName(owner, repoName);
-    ensureRepositoryAccess(repository, userId);
+    if (comment.authorId !== userId && repository.ownerId !== userId) {
+        throw new ApiError(403, 'You do not have permission to modify this comment');
+    }
+};
 
-    const discussionId = await db.$transaction(async (tx) => {
-        const lastDiscussion = await tx.discussion.findFirst({
-            where: { repositoryId: repository.id },
-            orderBy: { number: 'desc' },
-            select: { number: true },
-        });
-
-        const nextNumber = (lastDiscussion?.number ?? 0) + 1;
-
-        const createdDiscussion = await tx.discussion.create({
-            data: {
-                number: nextNumber,
-                title: data.title,
-                body: data.body,
-                category: mapCategoryToEnum(data.category) ?? DiscussionCategory.GENERAL,
-                repositoryId: repository.id,
-                authorId: userId,
-            },
-        });
-
-        await tx.repository.update({
-            where: { id: repository.id },
-            data: {
-                discussionsCount: { increment: 1 },
-            },
-        });
-
-        return createdDiscussion.id;
-    });
-
+const loadDiscussionWithComments = async (discussionId: string) => {
     const discussion = await db.discussion.findUnique({
         where: { id: discussionId },
         include: discussionWithCommentsInclude,
@@ -205,12 +174,56 @@ export const createDiscussion = async (
     return mapDiscussionWithComments(discussion);
 };
 
+export const createDiscussion = async (
+    owner: string,
+    repoName: string,
+    userId: string,
+    data: {
+        title: string;
+        body?: string;
+    }
+) => {
+    const repository = await findRepositoryByOwnerAndName(owner, repoName);
+    ensureRepositoryReadAccess(repository, userId);
+
+    const discussionId = await db.$transaction(async (tx) => {
+        const lastDiscussion = await tx.discussion.findFirst({
+            where: { repositoryId: repository.id },
+            orderBy: { number: 'desc' },
+            select: { number: true },
+        });
+
+        const nextNumber = (lastDiscussion?.number ?? 0) + 1;
+
+        const created = await tx.discussion.create({
+            data: {
+                number: nextNumber,
+                title: data.title,
+                body: data.body,
+                repositoryId: repository.id,
+                authorId: userId,
+            },
+        });
+
+        await tx.repository.update({
+            where: { id: repository.id },
+            data: {
+                discussionsCount: { increment: 1 },
+            },
+        });
+
+        return created.id;
+    });
+
+    return loadDiscussionWithComments(discussionId);
+};
+
 export const listDiscussions = async (
     owner: string,
     repoName: string,
     requesterId: string | undefined,
     options?: {
-        category?: 'general' | 'qanda' | 'show_and_tell' | 'ideas';
+        state?: 'open' | 'closed';
         authorId?: string;
         search?: string;
         page?: number;
@@ -218,7 +231,7 @@ export const listDiscussions = async (
     }
 ) => {
     const repository = await findRepositoryByOwnerAndName(owner, repoName);
-    ensureRepositoryAccess(repository, requesterId);
+    ensureRepositoryReadAccess(repository, requesterId);
 
     const page = options?.page ?? 1;
     const limit = options?.limit ?? 20;
@@ -228,11 +241,8 @@ export const listDiscussions = async (
         repositoryId: repository.id,
     };
 
-    if (options?.category) {
-        const categoryEnum = mapCategoryToEnum(options.category);
-        if (categoryEnum) {
-            where.category = categoryEnum;
-        }
+    if (options?.state) {
+        where.state = options.state === 'closed' ? DiscussionState.CLOSED : DiscussionState.OPEN;
     }
 
     if (options?.authorId) {
@@ -258,7 +268,7 @@ export const listDiscussions = async (
     ]);
 
     return {
-        discussions: discussions.map(mapDiscussionBase),
+        discussions: discussions.map(mapDiscussion),
         pagination: {
             page,
             limit,
@@ -277,7 +287,7 @@ export const getDiscussion = async (
     requesterId?: string
 ) => {
     const repository = await findRepositoryByOwnerAndName(owner, repoName);
-    ensureRepositoryAccess(repository, requesterId);
+    ensureRepositoryReadAccess(repository, requesterId);
 
     const discussion = await db.discussion.findFirst({
         where: {
@@ -302,24 +312,19 @@ export const updateDiscussion = async (
     data: {
         title?: string;
         body?: string;
-        category?: 'general' | 'qanda' | 'show_and_tell' | 'ideas';
     }
 ) => {
     const repository = await findRepositoryByOwnerAndName(owner, repoName);
-    ensureRepositoryAccess(repository, userId);
+    ensureRepositoryReadAccess(repository, userId);
 
     const discussion = await getDiscussionEntity(repository.id, discussionNumber);
-
-    if (discussion.authorId !== userId && repository.ownerId !== userId) {
-        throw new ApiError(403, 'You do not have permission to update this discussion');
-    }
+    ensureDiscussionWritable(discussion, repository, userId);
 
     const updated = await db.discussion.update({
         where: { id: discussion.id },
         data: {
             title: data.title ?? discussion.title,
             body: data.body ?? discussion.body,
-            category: mapCategoryToEnum(data.category) ?? discussion.category,
         },
         include: discussionWithCommentsInclude,
     });
@@ -327,35 +332,29 @@ export const updateDiscussion = async (
     return mapDiscussionWithComments(updated);
 };
 
-export const deleteDiscussion = async (
+export const updateDiscussionState = async (
     owner: string,
     repoName: string,
     discussionNumber: number,
-    userId: string
+    userId: string,
+    state: 'open' | 'closed'
 ) => {
     const repository = await findRepositoryByOwnerAndName(owner, repoName);
-    ensureRepositoryAccess(repository, userId);
+    ensureRepositoryReadAccess(repository, userId);
 
     const discussion = await getDiscussionEntity(repository.id, discussionNumber);
+    ensureDiscussionWritable(discussion, repository, userId);
 
-    if (discussion.authorId !== userId && repository.ownerId !== userId) {
-        throw new ApiError(403, 'You do not have permission to delete this discussion');
-    }
-
-    await db.$transaction(async (tx) => {
-        await tx.discussion.delete({
-            where: { id: discussion.id },
-        });
-
-        await tx.repository.update({
-            where: { id: repository.id },
-            data: {
-                discussionsCount: { decrement: 1 },
-            },
-        });
+    const updated = await db.discussion.update({
+        where: { id: discussion.id },
+        data: {
+            state: state === 'closed' ? DiscussionState.CLOSED : DiscussionState.OPEN,
+            closedAt: state === 'closed' ? new Date() : null,
+        },
+        include: discussionWithCommentsInclude,
     });
 
-    return { message: 'Discussion deleted successfully' };
+    return mapDiscussionWithComments(updated);
 };
 
 export const addDiscussionComment = async (
@@ -363,24 +362,35 @@ export const addDiscussionComment = async (
     repoName: string,
     discussionNumber: number,
     userId: string,
-    body: string
+    data: {
+        body: string;
+        parentId?: string;
+    }
 ) => {
     const repository = await findRepositoryByOwnerAndName(owner, repoName);
-    ensureRepositoryAccess(repository, userId);
+    ensureRepositoryReadAccess(repository, userId);
 
     const discussion = await getDiscussionEntity(repository.id, discussionNumber);
 
+    if (data.parentId) {
+        const parent = await db.discussionComment.findUnique({
+            where: { id: data.parentId },
+            select: { id: true, discussionId: true },
+        });
+
+        if (!parent || parent.discussionId !== discussion.id) {
+            throw new ApiError(400, 'Parent comment does not belong to this discussion');
+        }
+    }
+
     const comment = await db.discussionComment.create({
         data: {
-            body,
+            body: data.body,
             discussionId: discussion.id,
             authorId: userId,
+            parentId: data.parentId,
         },
-        include: {
-            author: {
-                select: userSelect,
-            },
-        },
+        include: commentInclude,
     });
 
     return mapComment(comment);
@@ -397,7 +407,7 @@ export const listDiscussionComments = async (
     }
 ) => {
     const repository = await findRepositoryByOwnerAndName(owner, repoName);
-    ensureRepositoryAccess(repository, requesterId);
+    ensureRepositoryReadAccess(repository, requesterId);
 
     const discussion = await getDiscussionEntity(repository.id, discussionNumber);
 
@@ -411,11 +421,7 @@ export const listDiscussionComments = async (
             skip,
             take: limit,
             orderBy: { createdAt: 'asc' },
-            include: {
-                author: {
-                    select: userSelect,
-                },
-            },
+            include: commentInclude,
         }),
         db.discussionComment.count({ where: { discussionId: discussion.id } }),
     ]);
@@ -442,35 +448,25 @@ export const updateDiscussionComment = async (
     body: string
 ) => {
     const repository = await findRepositoryByOwnerAndName(owner, repoName);
-    ensureRepositoryAccess(repository, userId);
+    ensureRepositoryReadAccess(repository, userId);
 
     const discussion = await getDiscussionEntity(repository.id, discussionNumber);
 
     const comment = await db.discussionComment.findUnique({
         where: { id: commentId },
-        include: {
-            author: {
-                select: userSelect,
-            },
-        },
+        include: commentInclude,
     });
 
     if (!comment || comment.discussionId !== discussion.id) {
         throw new ApiError(404, 'Comment not found');
     }
 
-    if (comment.authorId !== userId) {
-        throw new ApiError(403, 'You do not have permission to update this comment');
-    }
+    ensureCommentWritable(comment, repository, userId);
 
     const updated = await db.discussionComment.update({
         where: { id: commentId },
         data: { body },
-        include: {
-            author: {
-                select: userSelect,
-            },
-        },
+        include: commentInclude,
     });
 
     return mapComment(updated);
@@ -484,25 +480,161 @@ export const deleteDiscussionComment = async (
     userId: string
 ) => {
     const repository = await findRepositoryByOwnerAndName(owner, repoName);
-    ensureRepositoryAccess(repository, userId);
+    ensureRepositoryReadAccess(repository, userId);
 
     const discussion = await getDiscussionEntity(repository.id, discussionNumber);
 
     const comment = await db.discussionComment.findUnique({
         where: { id: commentId },
+        select: {
+            id: true,
+            discussionId: true,
+            authorId: true,
+        },
     });
 
     if (!comment || comment.discussionId !== discussion.id) {
         throw new ApiError(404, 'Comment not found');
     }
 
-    if (comment.authorId !== userId && repository.ownerId !== userId) {
-        throw new ApiError(403, 'You do not have permission to delete this comment');
-    }
+    ensureCommentWritable(comment, repository, userId);
 
     await db.discussionComment.delete({
         where: { id: commentId },
     });
 
     return { message: 'Comment deleted successfully' };
+};
+
+export const listCommentReactions = async (
+    owner: string,
+    repoName: string,
+    discussionNumber: number,
+    commentId: string,
+    requesterId?: string
+) => {
+    const repository = await findRepositoryByOwnerAndName(owner, repoName);
+    ensureRepositoryReadAccess(repository, requesterId);
+
+    const discussion = await getDiscussionEntity(repository.id, discussionNumber);
+
+    const comment = await db.discussionComment.findUnique({
+        where: { id: commentId },
+        select: {
+            id: true,
+            discussionId: true,
+        },
+    });
+
+    if (!comment || comment.discussionId !== discussion.id) {
+        throw new ApiError(404, 'Comment not found');
+    }
+
+    const reactions = await db.commentReaction.findMany({
+        where: { commentId },
+        orderBy: { createdAt: 'asc' },
+        include: reactionInclude,
+    });
+
+    return reactions.map(mapReaction);
+};
+
+export const addCommentReaction = async (
+    owner: string,
+    repoName: string,
+    discussionNumber: number,
+    commentId: string,
+    userId: string,
+    emoji: string
+) => {
+    const repository = await findRepositoryByOwnerAndName(owner, repoName);
+    ensureRepositoryReadAccess(repository, userId);
+
+    const discussion = await getDiscussionEntity(repository.id, discussionNumber);
+
+    const comment = await db.discussionComment.findUnique({
+        where: { id: commentId },
+        select: {
+            id: true,
+            discussionId: true,
+        },
+    });
+
+    if (!comment || comment.discussionId !== discussion.id) {
+        throw new ApiError(404, 'Comment not found');
+    }
+
+    const existing = await db.commentReaction.findUnique({
+        where: {
+            commentId_userId_emoji: {
+                commentId,
+                userId,
+                emoji,
+            },
+        },
+    });
+
+    if (existing) {
+        throw new ApiError(400, 'You have already added this reaction');
+    }
+
+    const reaction = await db.commentReaction.create({
+        data: {
+            commentId,
+            userId,
+            emoji,
+        },
+        include: reactionInclude,
+    });
+
+    return mapReaction(reaction);
+};
+
+export const removeCommentReaction = async (
+    owner: string,
+    repoName: string,
+    discussionNumber: number,
+    commentId: string,
+    reactionId: string,
+    userId: string
+) => {
+    const repository = await findRepositoryByOwnerAndName(owner, repoName);
+    ensureRepositoryReadAccess(repository, userId);
+
+    const discussion = await getDiscussionEntity(repository.id, discussionNumber);
+
+    const comment = await db.discussionComment.findUnique({
+        where: { id: commentId },
+        select: {
+            id: true,
+            discussionId: true,
+        },
+    });
+
+    if (!comment || comment.discussionId !== discussion.id) {
+        throw new ApiError(404, 'Comment not found');
+    }
+
+    const reaction = await db.commentReaction.findUnique({
+        where: { id: reactionId },
+        select: {
+            id: true,
+            commentId: true,
+            userId: true,
+        },
+    });
+
+    if (!reaction || reaction.commentId !== commentId) {
+        throw new ApiError(404, 'Reaction not found');
+    }
+
+    if (reaction.userId !== userId && repository.ownerId !== userId) {
+        throw new ApiError(403, 'You do not have permission to remove this reaction');
+    }
+
+    await db.commentReaction.delete({
+        where: { id: reactionId },
+    });
+
+    return { message: 'Reaction removed successfully' };
 };

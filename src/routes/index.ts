@@ -3,10 +3,8 @@ import authRoutes from './auth.routes';
 import userRoutes from './user.routes';
 import repositoryRoutes from './repository.routes';
 import issueRoutes from './issue.routes';
-import pullRequestRoutes from './pull-request.routes';
 import discussionRoutes from './discussion.routes';
-import notificationRoutes from './notification.routes';
-import activityRoutes from './activity.routes';
+import pullRequestRoutes from './pull-request.routes';
 
 const router = Router();
 
@@ -17,10 +15,8 @@ router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
 router.use('/repos', repositoryRoutes);
 router.use('/repos', issueRoutes);
-router.use('/repos', pullRequestRoutes);
 router.use('/repos', discussionRoutes);
-router.use('/notifications', notificationRoutes);
-router.use('/', activityRoutes);
+router.use('/repos', pullRequestRoutes);
 
 /**
  * Health check route

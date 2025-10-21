@@ -43,13 +43,14 @@ model User {
     issueAssignees IssueAssignee[]
     issueComments  IssueComment[]
 
-    discussions        Discussion[]
-    discussionComments DiscussionComment[]
-
     pullRequests PullRequest[]
     prAssignees  PullRequestAssignee[]
     prReviews    PullRequestReview[]
     prComments   PullRequestComment[]
+
+    discussions        Discussion[]
+    discussionComments DiscussionComment[]
+    commentReactions   CommentReaction[]
 
     commits        Commit[]
     collaborations Collaborator[]
@@ -324,15 +325,16 @@ model IssueComment {
 // ============================================
 
 model Discussion {
-    id           String             @id @default(uuid())
+    id           String          @id @default(uuid())
     number       Int
     title        String
     body         String?
-    category     DiscussionCategory @default(GENERAL)
+    state        DiscussionState @default(OPEN)
     repositoryId String
     authorId     String
-    createdAt    DateTime           @default(now())
-    updatedAt    DateTime           @updatedAt
+    closedAt     DateTime?
+    createdAt    DateTime        @default(now())
+    updatedAt    DateTime        @updatedAt
 
     repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
     author     User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
@@ -342,6 +344,7 @@ model Discussion {
     @@unique([repositoryId, number])
     @@index([repositoryId])
     @@index([authorId])
+    @@index([state])
     @@map("discussions")
 }
 
@@ -350,15 +353,36 @@ model DiscussionComment {
     body         String
     discussionId String
     authorId     String
+    parentId     String?
     createdAt    DateTime @default(now())
     updatedAt    DateTime @updatedAt
 
-    discussion Discussion @relation(fields: [discussionId], references: [id], onDelete: Cascade)
-    author     User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
+    discussion Discussion          @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+    author     User                @relation(fields: [authorId], references: [id], onDelete: Cascade)
+    parent     DiscussionComment?  @relation("DiscussionCommentReplies", fields: [parentId], references: [id])
+    replies    DiscussionComment[] @relation("DiscussionCommentReplies")
+    reactions  CommentReaction[]
 
     @@index([discussionId])
     @@index([authorId])
+    @@index([parentId])
     @@map("discussion_comments")
+}
+
+model CommentReaction {
+    id        String   @id @default(uuid())
+    emoji     String
+    commentId String
+    userId    String
+    createdAt DateTime @default(now())
+
+    comment DiscussionComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+    user    User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@unique([commentId, userId, emoji])
+    @@index([commentId])
+    @@index([userId])
+    @@map("comment_reactions")
 }
 
 // ============================================
@@ -553,6 +577,11 @@ enum IssueState {
     CLOSED
 }
 
+enum DiscussionState {
+    OPEN
+    CLOSED
+}
+
 enum PullRequestState {
     OPEN
     CLOSED
@@ -564,13 +593,6 @@ enum ReviewState {
     CHANGES_REQUESTED
     COMMENTED
     DISMISSED
-}
-
-enum DiscussionCategory {
-    GENERAL
-    QANDA
-    SHOW_AND_TELL
-    IDEAS
 }
 
 enum OrgRole {

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const activityTypes = [
+const activityTypeValues = [
     'created_repo',
     'forked_repo',
     'starred_repo',
@@ -14,13 +14,16 @@ export const activityTypes = [
     'followed_user',
 ] as const;
 
+const isoDateString = z
+    .string()
+    .refine((value) => !Number.isNaN(Date.parse(value)), 'Invalid ISO date string');
+
 export const listActivitiesQuerySchema = z.object({
-    type: z.union([z.string(), z.array(z.string())]).optional(),
-    page: z
-        .coerce.number()
-        .int('Page must be an integer')
-        .min(1, 'Page must be at least 1')
-        .optional(),
+    type: z.enum(activityTypeValues).optional(),
+    repositoryId: z.string().uuid('Invalid repository id').optional(),
+    since: isoDateString.optional(),
+    until: isoDateString.optional(),
+    page: z.coerce.number().int('Page must be an integer').min(1, 'Page must be at least 1').optional(),
     limit: z
         .coerce.number()
         .int('Limit must be an integer')
@@ -29,4 +32,7 @@ export const listActivitiesQuerySchema = z.object({
         .optional(),
 });
 
-export type ActivityTypeFilter = (typeof activityTypes)[number];
+export const activityFeedParamSchema = z.object({
+    username: z.string().min(3, 'Username must be at least 3 characters'),
+});
+

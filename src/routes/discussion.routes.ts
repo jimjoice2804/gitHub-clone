@@ -5,11 +5,14 @@ import { validate, validateParams, validateQuery } from '../middleware/validate.
 import {
     createDiscussionSchema,
     updateDiscussionSchema,
+    updateDiscussionStateSchema,
+    createDiscussionCommentSchema,
+    updateDiscussionCommentSchema,
+    createReactionSchema,
     listDiscussionsQuerySchema,
     discussionNumberParamSchema,
     discussionCommentParamSchema,
-    createDiscussionCommentSchema,
-    updateDiscussionCommentSchema,
+    reactionParamSchema,
 } from '../utils/validations/discussion.validation';
 import { repoNameParamSchema } from '../utils/validations/repository.validation';
 
@@ -47,11 +50,12 @@ router.patch(
     discussionController.updateDiscussion
 );
 
-router.delete(
-    '/:owner/:repo/discussions/:discussionNumber',
+router.patch(
+    '/:owner/:repo/discussions/:discussionNumber/state',
     authenticate,
     validateParams(discussionNumberParamSchema),
-    discussionController.deleteDiscussion
+    validate(updateDiscussionStateSchema),
+    discussionController.updateDiscussionState
 );
 
 // Discussion comments
@@ -85,4 +89,28 @@ router.delete(
     discussionController.deleteDiscussionComment
 );
 
+// Comment reactions
+router.get(
+    '/:owner/:repo/discussions/:discussionNumber/comments/:commentId/reactions',
+    optionalAuthenticate,
+    validateParams(discussionCommentParamSchema),
+    discussionController.listCommentReactions
+);
+
+router.post(
+    '/:owner/:repo/discussions/:discussionNumber/comments/:commentId/reactions',
+    authenticate,
+    validateParams(discussionCommentParamSchema),
+    validate(createReactionSchema),
+    discussionController.addCommentReaction
+);
+
+router.delete(
+    '/:owner/:repo/discussions/:discussionNumber/comments/:commentId/reactions/:reactionId',
+    authenticate,
+    validateParams(reactionParamSchema),
+    discussionController.removeCommentReaction
+);
+
 export default router;
+
