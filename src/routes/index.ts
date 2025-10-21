@@ -4,6 +4,8 @@ import userRoutes from './user.routes';
 import repositoryRoutes from './repository.routes';
 import issueRoutes from './issue.routes';
 import discussionRoutes from './discussion.routes';
+import notificationRoutes from './notification.routes';
+import activityRoutes from './activity.routes';
 import pullRequestRoutes from './pull-request.routes';
 
 const router = Router();
@@ -17,6 +19,8 @@ router.use('/repos', repositoryRoutes);
 router.use('/repos', issueRoutes);
 router.use('/repos', discussionRoutes);
 router.use('/repos', pullRequestRoutes);
+router.use('/notifications', notificationRoutes);
+router.use('/activities', activityRoutes);
 
 /**
  * Health check route
