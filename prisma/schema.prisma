@@ -43,6 +43,9 @@ model User {
     issueAssignees IssueAssignee[]
     issueComments  IssueComment[]
 
+    discussions        Discussion[]
+    discussionComments DiscussionComment[]
+
     pullRequests PullRequest[]
     prAssignees  PullRequestAssignee[]
     prReviews    PullRequestReview[]
@@ -92,6 +95,7 @@ model Repository {
     watchersCount     Int @default(0)
     issuesCount       Int @default(0)
     pullRequestsCount Int @default(0)
+    discussionsCount  Int @default(0)
 
     ownerId        String
     forkedFromId   String?
@@ -113,6 +117,7 @@ model Repository {
     watchers      Watch[]
     issues        Issue[]
     pullRequests  PullRequest[]
+    discussions   Discussion[]
     collaborators Collaborator[]
     activities    Activity[]
 
@@ -312,6 +317,48 @@ model IssueComment {
     @@index([issueId])
     @@index([authorId])
     @@map("issue_comments")
+}
+
+// ============================================
+// DISCUSSION MODELS
+// ============================================
+
+model Discussion {
+    id           String             @id @default(uuid())
+    number       Int
+    title        String
+    body         String?
+    category     DiscussionCategory @default(GENERAL)
+    repositoryId String
+    authorId     String
+    createdAt    DateTime           @default(now())
+    updatedAt    DateTime           @updatedAt
+
+    repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+    author     User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+    comments DiscussionComment[]
+
+    @@unique([repositoryId, number])
+    @@index([repositoryId])
+    @@index([authorId])
+    @@map("discussions")
+}
+
+model DiscussionComment {
+    id           String   @id @default(uuid())
+    body         String
+    discussionId String
+    authorId     String
+    createdAt    DateTime @default(now())
+    updatedAt    DateTime @updatedAt
+
+    discussion Discussion @relation(fields: [discussionId], references: [id], onDelete: Cascade)
+    author     User       @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+    @@index([discussionId])
+    @@index([authorId])
+    @@map("discussion_comments")
 }
 
 // ============================================
@@ -517,6 +564,13 @@ enum ReviewState {
     CHANGES_REQUESTED
     COMMENTED
     DISMISSED
+}
+
+enum DiscussionCategory {
+    GENERAL
+    QANDA
+    SHOW_AND_TELL
+    IDEAS
 }
 
 enum OrgRole {
